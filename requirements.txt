@@ -1,0 +1,9 @@
+streamlit
+supabase
+google-genai
+pydantic
+pypdf
+beautifulsoup4
+httpx
+playwright
+python-dotenv
