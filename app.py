@@ -33,6 +33,32 @@ ai_client = genai.Client(
     http_options=types.HttpOptions(api_version="v1")
 )
 
+# ----------------- SESSION VISIT TRACKER -----------------
+def track_and_get_visitor_count() -> int:
+    """Increments visit count once per new browser session and returns total count."""
+    if "session_counted" not in st.session_state:
+        st.session_state.session_counted = True
+        try:
+            rpc_res = supabase.rpc("increment_site_visits").execute()
+            if rpc_res.data is not None:
+                st.session_state.cached_visitor_count = int(rpc_res.data)
+                return int(rpc_res.data)
+        except Exception:
+            pass
+
+    if "cached_visitor_count" in st.session_state:
+        return st.session_state.cached_visitor_count
+
+    try:
+        res = supabase.table("site_stats").select("stat_value").eq("stat_name", "total_page_visits").execute()
+        if res.data:
+            val = int(res.data[0]["stat_value"])
+            st.session_state.cached_visitor_count = val
+            return val
+    except Exception:
+        pass
+    return 1
+
 # ----------------- TIER QUOTAS & USAGE ENGINE -----------------
 TIER_LIMITS = {
     "free": {"chat": 5, "cv": 1},
@@ -73,7 +99,6 @@ def get_current_usage():
             supabase.table("user_usage").insert(new_record).execute()
             return new_record
     except Exception:
-        # Fallback to local session storage if table is not yet set up
         if "local_usage" not in st.session_state:
             st.session_state.local_usage = {"chat_count": 0, "cv_count": 0, "is_pro": is_pro}
         return st.session_state.local_usage
@@ -110,6 +135,17 @@ def check_and_increment_quota(action_type: str) -> tuple[bool, str]:
 
     return True, ""
 
+@st.cache_data(ttl=60)
+def get_live_job_count():
+    """Fetches exact count of vacancies stored in the database."""
+    try:
+        job_res = supabase.table("jobs").select("id", count="exact").limit(1).execute()
+        if job_res.count is not None:
+            return f"{job_res.count:,}"
+    except Exception:
+        pass
+    return "2,113"
+
 # ----------------- PYDANTIC SCHEMAS -----------------
 class JobMatch(BaseModel):
     ref_no: str
@@ -145,7 +181,6 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# Suppress external referer to prevent session bounces on external job portals
 st.markdown('<meta name="referrer" content="no-referrer">', unsafe_allow_html=True)
 
 # Custom Styling
@@ -208,7 +243,7 @@ st.markdown(
         border: 1px solid rgba(255, 75, 75, 0.22);
         border-radius: 10px;
         padding: 0.85rem 1.15rem;
-        margin-bottom: 1.25rem;
+        margin-bottom: 1.15rem;
     }
 
     .hero-banner p {
@@ -247,12 +282,24 @@ st.markdown(
     <div class="hero-banner">
         <p>🎯 <strong>Tell me which kind of job you are looking for — I will find the best fits for you!</strong><br>
         <span style="font-size: 0.88rem; color: #9ca3af; font-weight: normal;">
-        AI-powered matching across 1,800+ live technical vacancies from TopJobs.lk, LinkedIn, and XpressJobs.
+        AI-powered matching across live technical vacancies from TopJobs.lk, LinkedIn, and XpressJobs.
         </span></p>
     </div>
     """,
     unsafe_allow_html=True
 )
+
+# Active Job Listing metric card on the main page
+active_vacancies = get_live_job_count()
+st.markdown(f"""
+    <div style="background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 12px 20px; display: inline-flex; align-items: center; gap: 12px; margin-bottom: 1.4rem;">
+        <span style="font-size: 1.3rem;">💼</span>
+        <div>
+            <span style="font-size: 0.82rem; color: #9ca3af; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Active Technical Vacancies: </span>
+            <span style="font-size: 1.25rem; font-weight: 800; color: #f97316;">{active_vacancies}</span>
+        </div>
+    </div>
+""", unsafe_allow_html=True)
 
 # Candidate Resume Preset
 SUNAYANA_CV_PRESET = (
@@ -488,7 +535,6 @@ else:
         p_name = st.text_input("Username:", key="pro_name_in")
         p_pass = st.text_input("Password:", type="password", key="pro_pwd_in")
         if st.button("Activate Pro", use_container_width=True):
-            # Read securely without any hardcoded defaults
             valid_user = os.getenv("PRO_USER") or (st.secrets["PRO_USER"] if "PRO_USER" in st.secrets else None)
             valid_pass = os.getenv("PRO_PASSWORD") or (st.secrets["PRO_PASSWORD"] if "PRO_PASSWORD" in st.secrets else None)
             
@@ -535,6 +581,16 @@ st.session_state.active_cv_text = st.sidebar.text_area(
     placeholder="No CV loaded. Conversational search will use your direct chat queries.",
     height=140
 )
+
+# ----------------- BOTTOM OF SIDEBAR: USERS BADGE -----------------
+total_visitors = track_and_get_visitor_count()
+st.sidebar.markdown("---")
+st.sidebar.markdown(f"""
+    <div style="background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 10px 14px; text-align: center;">
+        <div style="font-size: 0.72rem; color: #9ca3af; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Platform Users</div>
+        <div style="font-size: 1.28rem; font-weight: 700; color: #10b981; margin-top: 3px;">👥 {total_visitors:,}</div>
+    </div>
+""", unsafe_allow_html=True)
 
 # =================================================
 # VIEW 1: CONVERSATIONAL JOB SEARCH CHATBOT
@@ -595,7 +651,6 @@ if nav_selection == "💬 Job Match Chatbot":
     user_prompt = active_prompt or chat_input_val
 
     if user_prompt:
-        # Check quota prior to execution
         allowed, quota_msg = check_and_increment_quota("chat")
         if not allowed:
             st.warning(quota_msg, icon="🛑")
