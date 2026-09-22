@@ -2,6 +2,8 @@ import os
 import re
 import json
 import time
+import hashlib
+from datetime import datetime, timezone
 import streamlit as st
 import streamlit.components.v1 as components
 from pypdf import PdfReader
@@ -24,13 +26,89 @@ if not sb_url or not sb_key or not gemini_key:
     st.stop()
 
 supabase: Client = create_client(sb_url, sb_key)
-from google.genai import types
 
-# Configures the client to use the stable v1 API and direct API key authentication for AQ. keys
+# Configures the client to use the stable v1 API and direct API key authentication
 ai_client = genai.Client(
     api_key=gemini_key.strip(),
     http_options=types.HttpOptions(api_version="v1")
 )
+
+# ----------------- TIER QUOTAS & USAGE ENGINE -----------------
+TIER_LIMITS = {
+    "free": {"chat": 5, "cv": 1},
+    "pro":  {"chat": 10, "cv": 2}
+}
+
+def get_client_identifier() -> str:
+    """Identifies unique client via IP hash or session fallback."""
+    try:
+        forwarded = st.context.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = st.context.headers.get("Remote-Addr", "unknown_user")
+    except Exception:
+        ip = "local_user"
+    return hashlib.sha256(ip.encode()).hexdigest()[:16]
+
+def get_current_usage():
+    """Fetches or initializes the daily usage record for this client."""
+    user_id = get_client_identifier()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    record_id = f"{user_id}_{today}"
+    is_pro = st.session_state.get("is_pro", False)
+
+    try:
+        res = supabase.table("user_usage").select("*").eq("id", record_id).execute()
+        if res.data:
+            return res.data[0]
+        else:
+            new_record = {
+                "id": record_id,
+                "usage_date": today,
+                "chat_count": 0,
+                "cv_count": 0,
+                "is_pro": is_pro
+            }
+            supabase.table("user_usage").insert(new_record).execute()
+            return new_record
+    except Exception:
+        # Fallback to local session storage if table is not yet set up
+        if "local_usage" not in st.session_state:
+            st.session_state.local_usage = {"chat_count": 0, "cv_count": 0, "is_pro": is_pro}
+        return st.session_state.local_usage
+
+def check_and_increment_quota(action_type: str) -> tuple[bool, str]:
+    """Validates quota and increments count if allowable."""
+    user_id = get_client_identifier()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    record_id = f"{user_id}_{today}"
+    is_pro = st.session_state.get("is_pro", False)
+    tier = "pro" if is_pro else "free"
+    limit = TIER_LIMITS[tier][action_type]
+
+    usage = get_current_usage()
+    current_count = usage.get(f"{action_type}_count", 0)
+
+    if current_count >= limit:
+        action_name = "Job Searches" if action_type == "chat" else "CV Optimizations"
+        if not is_pro:
+            return False, f"⚠️ Daily free limit reached ({limit} {action_name}). Unlock **JobGPT Pro** in the left sidebar or come back tomorrow!"
+        else:
+            return False, f"⚠️ Daily Pro limit reached ({limit} {action_name}) for today. Resets tomorrow at 00:00 UTC."
+
+    new_count = current_count + 1
+    try:
+        supabase.table("user_usage").update({
+            f"{action_type}_count": new_count,
+            "is_pro": is_pro,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", record_id).execute()
+    except Exception:
+        if "local_usage" in st.session_state:
+            st.session_state.local_usage[f"{action_type}_count"] = new_count
+
+    return True, ""
 
 # ----------------- PYDANTIC SCHEMAS -----------------
 class JobMatch(BaseModel):
@@ -70,84 +148,80 @@ st.set_page_config(
 # Suppress external referer to prevent session bounces on external job portals
 st.markdown('<meta name="referrer" content="no-referrer">', unsafe_allow_html=True)
 
-# Custom Styling to pull content to the very top and polish elements
+# Custom Styling
 st.markdown(
     """
     <style>
-/* Add comfortable breathing room above JobGPT so it isn't clipped by the top bar */
-.block-container {
-    padding-top: 2.75rem !important;
-    padding-bottom: 2rem !important;
-}
+    .block-container {
+        padding-top: 2.75rem !important;
+        padding-bottom: 2rem !important;
+    }
 
-/* Responsive adjustment for mobile screens */
     @media (max-width: 768px) {
         .block-container {
             padding-top: 2rem !important;
             padding-left: 1rem !important;
             padding-right: 1rem !important;
         }
+    }
 
-/* Pull the sidebar content slightly higher up */
-section[data-testid="stSidebar"] .block-container {
-    padding-top: 1.25rem !important;
-}
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 1.25rem !important;
+    }
 
-/* Header Container */
-.brand-header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-bottom: 0.15rem;
-}
+    .brand-header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 0.15rem;
+    }
 
-.main-title {
-    font-size: 2.7rem;
-    font-weight: 800;
-    background: linear-gradient(90deg, #ff4b4b, #ff8533);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    letter-spacing: -0.5px;
-    line-height: 1.1;
-}
+    .main-title {
+        font-size: 2.7rem;
+        font-weight: 800;
+        background: linear-gradient(90deg, #ff4b4b, #ff8533);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.5px;
+        line-height: 1.1;
+    }
 
-.bot-icon {
-    background: rgba(255, 75, 75, 0.12);
-    border: 1px solid rgba(255, 75, 75, 0.35);
-    border-radius: 12px;
-    padding: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
+    .bot-icon {
+        background: rgba(255, 75, 75, 0.12);
+        border: 1px solid rgba(255, 75, 75, 0.35);
+        border-radius: 12px;
+        padding: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
 
-.sub-title {
-    font-size: 1.18rem;
-    font-weight: 600;
-    color: #d1d5db;
-    margin-bottom: 0.75rem;
-}
+    .sub-title {
+        font-size: 1.18rem;
+        font-weight: 600;
+        color: #d1d5db;
+        margin-bottom: 0.75rem;
+    }
 
-.hero-banner {
-    background: rgba(255, 75, 75, 0.07);
-    border: 1px solid rgba(255, 75, 75, 0.22);
-    border-radius: 10px;
-    padding: 0.85rem 1.15rem;
-    margin-bottom: 1.25rem;
-}
+    .hero-banner {
+        background: rgba(255, 75, 75, 0.07);
+        border: 1px solid rgba(255, 75, 75, 0.22);
+        border-radius: 10px;
+        padding: 0.85rem 1.15rem;
+        margin-bottom: 1.25rem;
+    }
 
-.hero-banner p {
-    font-size: 1.02rem;
-    margin: 0;
-    color: #f3f4f6;
-    font-weight: 500;
-}
-</style>
+    .hero-banner p {
+        font-size: 1.02rem;
+        margin: 0;
+        color: #f3f4f6;
+        font-weight: 500;
+    }
+    </style>
     """,
     unsafe_allow_html=True
 )
 
-# Header with Embedded Modern Vector Chatbot Icon
 st.markdown(
     """
     <div class="brand-header">
@@ -190,6 +264,8 @@ SUNAYANA_CV_PRESET = (
 )
 
 # Manage state
+if "is_pro" not in st.session_state:
+    st.session_state.is_pro = False
 if "active_cv_text" not in st.session_state:
     st.session_state.active_cv_text = ""
 if "chat_messages" not in st.session_state:
@@ -381,13 +457,47 @@ def call_gemini(prompt, schema):
             continue
     return None, last_err
 
-# ----------------- SIDEBAR: NAVIGATION & CV BUFFER -----------------
+# ----------------- SIDEBAR: NAVIGATION, PRO TIER & CV BUFFER -----------------
 st.sidebar.markdown("### 🧭 Navigation")
 nav_selection = st.sidebar.radio(
     "Select Feature:",
     ["💬 Job Match Chatbot", "📄 AI CV Optimizer & ATS Keywords"],
     label_visibility="collapsed"
 )
+
+st.sidebar.markdown("---")
+
+# PRO TIER / USAGE STATUS SECTION
+st.sidebar.markdown("### ⚡ Subscription & Daily Quota")
+current_usage = get_current_usage()
+is_user_pro = st.session_state.is_pro
+tier_name = "pro" if is_user_pro else "free"
+max_chats = TIER_LIMITS[tier_name]["chat"]
+max_cvs = TIER_LIMITS[tier_name]["cv"]
+used_chats = current_usage.get("chat_count", 0)
+used_cvs = current_usage.get("cv_count", 0)
+
+if is_user_pro:
+    st.sidebar.success(f"⭐ **JobGPT Pro Active**\n\n• Searches: **{used_chats} / {max_chats}** used\n• CV Reviews: **{used_cvs} / {max_cvs}** used")
+    if st.sidebar.button("Log out of Pro", use_container_width=True):
+        st.session_state.is_pro = False
+        st.rerun()
+else:
+    st.sidebar.info(f"👤 **Free Plan**\n\n• Searches: **{used_chats} / {max_chats}** used\n• CV Reviews: **{used_cvs} / {max_cvs}** used")
+    with st.sidebar.expander("🔑 Unlock Pro Access"):
+        p_name = st.text_input("Username:", key="pro_name_in")
+        p_pass = st.text_input("Password:", type="password", key="pro_pwd_in")
+        if st.button("Activate Pro", use_container_width=True):
+            # Read securely from environment / secrets
+            valid_user = os.getenv("PRO_USER") or st.secrets.get("PRO_USER", "Mate80pro")
+            valid_pass = os.getenv("PRO_PASSWORD") or st.secrets.get("PRO_PASSWORD", "2018")
+            
+            if p_name.strip() == valid_user and p_pass.strip() == valid_pass:
+                st.session_state.is_pro = True
+                st.success("Pro Activated! 10 searches + 2 CV reviews unlocked.")
+                st.rerun()
+            else:
+                st.error("Incorrect credentials.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📋 Candidate CV (Optional)")
@@ -485,84 +595,89 @@ if nav_selection == "💬 Job Match Chatbot":
     user_prompt = active_prompt or chat_input_val
 
     if user_prompt:
-        st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
+        # Check quota prior to execution
+        allowed, quota_msg = check_and_increment_quota("chat")
+        if not allowed:
+            st.warning(quota_msg, icon="🛑")
+        else:
+            st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
+            with st.chat_message("user"):
+                st.markdown(user_prompt)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Stage 1: Retrieving best matches via hybrid semantic + keyword search..."):
-                candidate_jobs = retrieve_hybrid_jobs(user_prompt, st.session_state.active_cv_text, top_k=100)
+            with st.chat_message("assistant"):
+                with st.spinner("Stage 1: Retrieving best matches via hybrid semantic + keyword search..."):
+                    candidate_jobs = retrieve_hybrid_jobs(user_prompt, st.session_state.active_cv_text, top_k=100)
 
-            with st.spinner(f"Stage 2: Gemini analyzing candidates to rank top {match_count}..."):
-                conversation_context = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
-                cv_section = f"Candidate CV Background:\n{st.session_state.active_cv_text}" if st.session_state.active_cv_text.strip() else "Candidate CV: [None provided. Rely strictly on the chat query!]"
+                with st.spinner(f"Stage 2: Gemini analyzing candidates to rank top {match_count}..."):
+                    conversation_context = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
+                    cv_section = f"Candidate CV Background:\n{st.session_state.active_cv_text}" if st.session_state.active_cv_text.strip() else "Candidate CV: [None provided. Rely strictly on the chat query!]"
 
-                eval_prompt = f"""
-                You are JobGPT, an expert technical engineering recruiter in Sri Lanka.
-                
-                {cv_section}
-                
-                Conversation Context:
-                {conversation_context}
-                
-                LATEST USER SEARCH QUERY: "{user_prompt}"
-                
-                Candidate Vacancies Retrieved from Sri Lanka Job Database:
-                {json.dumps(candidate_jobs, indent=2)}
-                
-                Instructions:
-                1. Thoroughly evaluate these candidate vacancies against the user's latest search query and any CV context provided.
-                2. Select the top {match_count} best matching opportunities with a match score >= {min_threshold}%.
-                3. Sort the returned matches strictly from highest match score to lowest.
-                4. For each matched position, provide the match score, domain category, a clear 2-sentence explanation of why it fits, and any skill gaps to prepare.
-                """
+                    eval_prompt = f"""
+                    You are JobGPT, an expert technical engineering recruiter in Sri Lanka.
+                    
+                    {cv_section}
+                    
+                    Conversation Context:
+                    {conversation_context}
+                    
+                    LATEST USER SEARCH QUERY: "{user_prompt}"
+                    
+                    Candidate Vacancies Retrieved from Sri Lanka Job Database:
+                    {json.dumps(candidate_jobs, indent=2)}
+                    
+                    Instructions:
+                    1. Thoroughly evaluate these candidate vacancies against the user's latest search query and any CV context provided.
+                    2. Select the top {match_count} best matching opportunities with a match score >= {min_threshold}%.
+                    3. Sort the returned matches strictly from highest match score to lowest.
+                    4. For each matched position, provide the match score, domain category, a clear 2-sentence explanation of why it fits, and any skill gaps to prepare.
+                    """
 
-                report, err = call_gemini(eval_prompt, MatchReport)
+                    report, err = call_gemini(eval_prompt, MatchReport)
 
-                if report and report.matched_jobs:
-                    reply_text = f"Retrieved top candidates via **Hybrid Search** and selected the **top {len(report.matched_jobs)} matches** for your query:"
-                    st.markdown(reply_text)
+                    if report and report.matched_jobs:
+                        reply_text = f"Retrieved top candidates via **Hybrid Search** and selected the **top {len(report.matched_jobs)} matches** for your query:"
+                        st.markdown(reply_text)
 
-                    serialized_jobs = []
-                    for item in sorted(report.matched_jobs, key=lambda x: x.match_score, reverse=True):
-                        final_url = clean_apply_url(item.ref_no, item.apply_url)
+                        serialized_jobs = []
+                        for item in sorted(report.matched_jobs, key=lambda x: x.match_score, reverse=True):
+                            final_url = clean_apply_url(item.ref_no, item.apply_url)
 
-                        job_data = {
-                            "ref_no": item.ref_no,
-                            "title": item.title,
-                            "company": item.company,
-                            "location": item.location,
-                            "url": final_url,
-                            "score": item.match_score,
-                            "domain": item.domain_category,
-                            "fit": item.fit_reason,
-                            "gaps": item.skill_gaps
-                        }
-                        serialized_jobs.append(job_data)
+                            job_data = {
+                                "ref_no": item.ref_no,
+                                "title": item.title,
+                                "company": item.company,
+                                "location": item.location,
+                                "url": final_url,
+                                "score": item.match_score,
+                                "domain": item.domain_category,
+                                "fit": item.fit_reason,
+                                "gaps": item.skill_gaps
+                            }
+                            serialized_jobs.append(job_data)
 
-                        badge = get_source_badge(item.ref_no)
-                        with st.container(border=True):
-                            c1, c2 = st.columns([3, 1])
-                            with c1:
-                                st.subheader(f"{item.title}")
-                                st.markdown(f"🏢 **{item.company}** | 📍 {item.location} | 🌐 Source: {badge} | Ref: `{item.ref_no}`")
-                                st.markdown(f"**Domain:** `{item.domain_category}`")
-                                st.markdown(f"**Why it matches:** {item.fit_reason}")
-                                if item.skill_gaps:
-                                    st.info(f"**Key skills to verify:** {item.skill_gaps}", icon="💡")
-                            with c2:
-                                st.metric("Fit Score", f"{item.match_score}%")
-                                render_apply_button(final_url, item.ref_no)
+                            badge = get_source_badge(item.ref_no)
+                            with st.container(border=True):
+                                c1, c2 = st.columns([3, 1])
+                                with c1:
+                                    st.subheader(f"{item.title}")
+                                    st.markdown(f"🏢 **{item.company}** | 📍 {item.location} | 🌐 Source: {badge} | Ref: `{item.ref_no}`")
+                                    st.markdown(f"**Domain:** `{item.domain_category}`")
+                                    st.markdown(f"**Why it matches:** {item.fit_reason}")
+                                    if item.skill_gaps:
+                                        st.info(f"**Key skills to verify:** {item.skill_gaps}", icon="💡")
+                                with c2:
+                                    st.metric("Fit Score", f"{item.match_score}%")
+                                    render_apply_button(final_url, item.ref_no)
 
-                    st.session_state.chat_messages.append({
-                        "role": "assistant",
-                        "content": reply_text,
-                        "job_cards": serialized_jobs
-                    })
-                else:
-                    err_msg = f"Could not complete matching: {err}" if err else f"No vacancies met the {min_threshold}% threshold for that query."
-                    st.error(err_msg)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
+                        st.session_state.chat_messages.append({
+                            "role": "assistant",
+                            "content": reply_text,
+                            "job_cards": serialized_jobs
+                        })
+                    else:
+                        err_msg = f"Could not complete matching: {err}" if err else f"No vacancies met the {min_threshold}% threshold for that query."
+                        st.error(err_msg)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
 
 # =================================================
 # VIEW 2: AI CV OPTIMIZER
@@ -580,45 +695,49 @@ elif nav_selection == "📄 AI CV Optimizer & ATS Keywords":
         if not st.session_state.active_cv_text.strip():
             st.warning("Please upload a PDF or click 'Load My CV' in the sidebar first to use the CV Optimizer.")
         else:
-            with st.spinner("Auditing resume against industry recruitment standards..."):
-                opt_prompt = f"""
-                You are JobGPT's principal technical hiring manager and engineering resume strategist.
-                
-                Target Specialization: {target_focus}
-                
-                Resume to Review:
-                {st.session_state.active_cv_text}
-                
-                Task:
-                1. Provide an ATS readiness score (0-100).
-                2. Summarize strategic strengths and critiques.
-                3. List 8 to 12 crucial ATS keywords to add for this engineering branch.
-                4. Select 3 to 5 actual bullet points from the CV and rewrite them using the Google XYZ formula: 'Accomplished [X] as measured by [Y] by doing [Z]'.
-                5. Highlight modern tools and standards to learn.
-                """
+            allowed, quota_msg = check_and_increment_quota("cv")
+            if not allowed:
+                st.warning(quota_msg, icon="🛑")
+            else:
+                with st.spinner("Auditing resume against industry recruitment standards..."):
+                    opt_prompt = f"""
+                    You are JobGPT's principal technical hiring manager and engineering resume strategist.
+                    
+                    Target Specialization: {target_focus}
+                    
+                    Resume to Review:
+                    {st.session_state.active_cv_text}
+                    
+                    Task:
+                    1. Provide an ATS readiness score (0-100).
+                    2. Summarize strategic strengths and critiques.
+                    3. List 8 to 12 crucial ATS keywords to add for this engineering branch.
+                    4. Select 3 to 5 actual bullet points from the CV and rewrite them using the Google XYZ formula: 'Accomplished [X] as measured by [Y] by doing [Z]'.
+                    5. Highlight modern tools and standards to learn.
+                    """
 
-                opt_report, opt_err = call_gemini(opt_prompt, CVOptimizationReport)
+                    opt_report, opt_err = call_gemini(opt_prompt, CVOptimizationReport)
 
-                if opt_report:
-                    st.metric("Resume ATS Industry Readiness", f"{opt_report.overall_score} / 100")
-                    st.markdown(f"### 📋 Strategic Assessment\n{opt_report.summary_critique}")
+                    if opt_report:
+                        st.metric("Resume ATS Industry Readiness", f"{opt_report.overall_score} / 100")
+                        st.markdown(f"### 📋 Strategic Assessment\n{opt_report.summary_critique}")
 
-                    st.markdown("---")
-                    st.markdown("### 🔑 High-Impact ATS Keywords to Include")
-                    kw_cols = st.columns(3)
-                    for idx, kw in enumerate(opt_report.crucial_missing_keywords):
-                        kw_cols[idx % 3].markdown(f"✔️ `{kw}`")
+                        st.markdown("---")
+                        st.markdown("### 🔑 High-Impact ATS Keywords to Include")
+                        kw_cols = st.columns(3)
+                        for idx, kw in enumerate(opt_report.crucial_missing_keywords):
+                            kw_cols[idx % 3].markdown(f"✔️ `{kw}`")
 
-                    st.markdown("---")
-                    st.markdown("### ✍️ Measurable Bullet Point Revisions (Google XYZ Formula)")
-                    for rev in opt_report.suggested_bullet_revisions:
-                        with st.expander(f"📌 Area: {rev.original_area}", expanded=True):
-                            st.markdown(f"**Critique:** {rev.critique}")
-                            st.success(f"**Recommended Rewrite:**\n\n{rev.improved_version}")
+                        st.markdown("---")
+                        st.markdown("### ✍️ Measurable Bullet Point Revisions (Google XYZ Formula)")
+                        for rev in opt_report.suggested_bullet_revisions:
+                            with st.expander(f"📌 Area: {rev.original_area}", expanded=True):
+                                st.markdown(f"**Critique:** {rev.critique}")
+                                st.success(f"**Recommended Rewrite:**\n\n{rev.improved_version}")
 
-                    st.markdown("---")
-                    st.markdown("### 🚀 Emerging Skills & Standards to Prioritize")
-                    for tool in opt_report.high_impact_skills_to_learn:
-                        st.markdown(f"• **{tool}**")
-                else:
-                    st.error(f"Could not complete CV optimization: {opt_err}")
+                        st.markdown("---")
+                        st.markdown("### 🚀 Emerging Skills & Standards to Prioritize")
+                        for tool in opt_report.high_impact_skills_to_learn:
+                            st.markdown(f"• **{tool}**")
+                    else:
+                        st.error(f"Could not complete CV optimization: {opt_err}")
