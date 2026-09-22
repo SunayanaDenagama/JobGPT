@@ -1,6 +1,6 @@
 streamlit
 supabase
-google-genai
+google-genai>=1.0.0
 pydantic
 pypdf
 beautifulsoup4

@@ -339,7 +339,8 @@ def retrieve_hybrid_jobs(user_query: str, cv_text: str, top_k: int = 100) -> lis
 
 # ----------------- MULTI-MODEL FALLBACK CALLER -----------------
 def call_gemini(prompt, schema):
-    models = ["gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    # gemini-2.5-flash natively supports the new AQ. key standard
+    models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
     last_err = ""
     for model_name in models:
         try:
@@ -353,10 +354,6 @@ def call_gemini(prompt, schema):
                 ),
             )
             return schema.model_validate_json(resp.text), None
-        except APIError as e:
-            last_err = e.message
-            time.sleep(1)
-            continue
         except Exception as e:
             last_err = str(e)
             time.sleep(1)
