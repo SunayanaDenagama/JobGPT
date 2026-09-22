@@ -64,7 +64,7 @@ st.set_page_config(
     page_title="JobGPT | LK Engineering Career AI",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # Suppress external referer to prevent session bounces on external job portals
@@ -79,6 +79,14 @@ st.markdown(
     padding-top: 2.75rem !important;
     padding-bottom: 2rem !important;
 }
+
+/* Responsive adjustment for mobile screens */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-top: 2rem !important;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+        }
 
 /* Pull the sidebar content slightly higher up */
 section[data-testid="stSidebar"] .block-container {
