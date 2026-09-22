@@ -24,7 +24,13 @@ if not sb_url or not sb_key or not gemini_key:
     st.stop()
 
 supabase: Client = create_client(sb_url, sb_key)
-ai_client = genai.Client(api_key=gemini_key)
+from google.genai import types
+
+# Configures the client to use the stable v1 API and direct API key authentication for AQ. keys
+ai_client = genai.Client(
+    api_key=gemini_key.strip(),
+    http_options=types.HttpOptions(api_version="v1")
+)
 
 # ----------------- PYDANTIC SCHEMAS -----------------
 class JobMatch(BaseModel):
@@ -339,8 +345,11 @@ def retrieve_hybrid_jobs(user_query: str, cv_text: str, top_k: int = 100) -> lis
 
 # ----------------- MULTI-MODEL FALLBACK CALLER -----------------
 def call_gemini(prompt, schema):
-    # gemini-2.5-flash natively supports the new AQ. key standard
-    models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    models = [
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-flash-latest"
+    ]
     last_err = ""
     for model_name in models:
         try:
@@ -354,6 +363,10 @@ def call_gemini(prompt, schema):
                 ),
             )
             return schema.model_validate_json(resp.text), None
+        except APIError as e:
+            last_err = e.message
+            time.sleep(1)
+            continue
         except Exception as e:
             last_err = str(e)
             time.sleep(1)
