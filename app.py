@@ -319,7 +319,7 @@ if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = [
         {
             "role": "assistant",
-            "content": "👋 **Welcome to JobGPT!**\n\nTell me which kind of job you are looking for, and I will find the best fits for you. You can search by engineering specialization, specific tools, or target companies — with or without attaching a CV."
+            "content": "👋 **Welcome to JobGPT!**\n\nTell me which kind of job you are looking for, and I will find the best fits for you. You can search by engineering specialization, specific tools, or target companies , with or without attaching a CV."
         }
     ]
 
@@ -663,7 +663,7 @@ if nav_selection == "💬 Job Match Chatbot":
                 with st.spinner("Stage 1: Retrieving best matches via hybrid semantic + keyword search..."):
                     candidate_jobs = retrieve_hybrid_jobs(user_prompt, st.session_state.active_cv_text, top_k=100)
 
-                with st.spinner(f"Stage 2: Gemini analyzing candidates to rank top {match_count}..."):
+                with st.spinner(f"Stage 2: JobGPT analyzing candidates to rank top {match_count}..."):
                     conversation_context = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
                     cv_section = f"Candidate CV Background:\n{st.session_state.active_cv_text}" if st.session_state.active_cv_text.strip() else "Candidate CV: [None provided. Rely strictly on the chat query!]"
 
