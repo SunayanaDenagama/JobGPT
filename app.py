@@ -488,11 +488,11 @@ else:
         p_name = st.text_input("Username:", key="pro_name_in")
         p_pass = st.text_input("Password:", type="password", key="pro_pwd_in")
         if st.button("Activate Pro", use_container_width=True):
-            # Read securely from environment / secrets
-            valid_user = os.getenv("PRO_USER") or st.secrets.get("PRO_USER", "Mate80pro")
-            valid_pass = os.getenv("PRO_PASSWORD") or st.secrets.get("PRO_PASSWORD", "2018")
+            # Read securely without any hardcoded defaults
+            valid_user = os.getenv("PRO_USER") or (st.secrets["PRO_USER"] if "PRO_USER" in st.secrets else None)
+            valid_pass = os.getenv("PRO_PASSWORD") or (st.secrets["PRO_PASSWORD"] if "PRO_PASSWORD" in st.secrets else None)
             
-            if p_name.strip() == valid_user and p_pass.strip() == valid_pass:
+            if valid_user and valid_pass and p_name.strip() == valid_user and p_pass.strip() == valid_pass:
                 st.session_state.is_pro = True
                 st.success("Pro Activated! 10 searches + 2 CV reviews unlocked.")
                 st.rerun()
