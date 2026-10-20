@@ -319,7 +319,7 @@ if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = [
         {
             "role": "assistant",
-            "content": "👋 **Welcome to JobGPT!**\n\nTell me which kind of job you are looking for, and I will find the best fits for you. You can search by engineering specialization, specific tools, or target companies , with or without attaching a CV."
+            "content": "👋 **Welcome to JobGPT!**\n\nTell me which kind of job you are looking for, and I will find the best fits for you. You can search by engineering specialization, specific tools, or target companies, with or without attaching a CV."
         }
     ]
 
@@ -346,7 +346,7 @@ def clean_apply_url(ref_no: str, original_url: str) -> str:
 def render_apply_button(url: str, ref_no: str, label: str = "View & Apply ↗"):
     target_url = clean_apply_url(ref_no, url)
     ref = ref_no.upper()
-    
+
     if ref.startswith("TJ-") or "topjobs.lk" in target_url:
         numeric_id = re.sub(r'[^0-9]+', '', ref_no).strip()
         html_code = f"""
@@ -393,86 +393,122 @@ def render_apply_button(url: str, ref_no: str, label: str = "View & Apply ↗"):
         """
     components.html(html_code, height=45)
 
-# ----------------- RELEVANCE & HYBRID RETRIEVAL -----------------
-def extract_query_keywords(prompt_text, cv_text):
-    stopwords = {"i", "want", "need", "looking", "for", "a", "an", "the", "in", "and", "or", "to", "of", "with", "jobs", "role", "roles", "engineer", "engineering", "show", "me", "find", "best", "matches"}
-    clean_prompt = re.sub(r'[^a-zA-Z0-9\s]', ' ', prompt_text.lower())
-    prompt_tokens = [w for w in clean_prompt.split() if len(w) > 2 and w not in stopwords]
-    
-    cv_tokens = []
-    if cv_text.strip():
-        domain_anchors = ["embedded", "firmware", "solar", "power", "electrical", "electronic", "verilog", "fpga", "scada", "civil", "mechanical", "biomedical", "python", "c++", "pytorch", "vision", "bess", "mamba", "robotics", "kicad"]
-        cv_lower = cv_text.lower()
-        cv_tokens = [term for term in domain_anchors if term in cv_lower]
-        
-    combined = list(dict.fromkeys(prompt_tokens + cv_tokens))
-    return " ".join(combined[:12])
+# ----------------- RELEVANCE & HYBRID RETRIEVAL (RRF SCORED) -----------------
+DOMAIN_SYNONYMS = {
+    "embedded": ["embedded", "firmware", "hardware", "iot", "electronic", "electronics", "fpga", "microcontroller", "mechatronics", "robotics", "rtos", "pcb"],
+    "firmware": ["firmware", "embedded", "hardware", "iot", "electronic", "rtos", "microcontroller"],
+    "electronic": ["electronic", "electronics", "embedded", "hardware", "pcb", "telecommunication", "telecom", "instrumentation", "electrical"],
+    "ai": ["ai", "machine learning", "ml", "data scientist", "deep learning", "nlp", "computer vision", "genai", "llm"],
+    "data": ["data", "analytics", "bi", "machine learning", "etl", "database", "warehouse", "power bi"],
+    "devops": ["devops", "cloud", "sre", "aws", "azure", "kubernetes", "infrastructure", "platform", "linux", "ci/cd"],
+    "software": ["software", "full stack", "fullstack", "backend", "frontend", "developer", "swe", ".net", "java", "react", "node", "python"],
+    "network": ["network", "cyber", "security", "noc", "soc", "system administrator", "infrastructure", "telecommunication", "firewall"],
+    "mechanical": ["mechanical", "mechatronics", "manufacturing", "production", "automotive", "hvac", "automation", "plant", "maintenance"],
+    "electrical": ["electrical", "power", "solar", "renewable", "automation", "electronic", "control", "mep", "instrumentation", "energy", "scada"],
+    "solar": ["solar", "renewable", "power", "electrical", "energy", "bess", "inverter", "pv", "scada"],
+    "civil": ["civil", "structural", "construction", "quantity surveyor", "site engineer", "bim", "draughtsman"],
+    "qa": ["qa", "quality assurance", "test", "automation", "sdet", "tester"]
+}
 
-def retrieve_hybrid_jobs(user_query: str, cv_text: str, top_k: int = 100) -> list[dict]:
-    results = []
-    seen_refs = set()
+def retrieve_hybrid_jobs(user_query: str, cv_text: str, top_k: int = 150) -> list[dict]:
+    candidates_by_ref = {}
 
-    # 1. Semantic Vector Similarity Search
+    # 1. Extract core tokens & expand with domain synonyms
+    raw_tokens = [w for w in re.sub(r'[^a-zA-Z0-9\s]', '', user_query.lower()).split() if len(w) >= 2]
+    stopwords = {"engineer", "engineering", "jobs", "job", "role", "roles", "find", "looking", "want", "need", "sri", "lanka", "in", "for", "positions"}
+    core_tokens = [w for w in raw_tokens if w not in stopwords] or raw_tokens
+
+    expanded_tokens = []
+    for token in core_tokens:
+        if token not in expanded_tokens:
+            expanded_tokens.append(token)
+        for key, syns in DOMAIN_SYNONYMS.items():
+            if token == key or token in syns:
+                for s in syns:
+                    if s not in expanded_tokens:
+                        expanded_tokens.append(s)
+
+    # 2. Targeted Keyword & Synonym Search (Scored by direct vs synonym match)
+    for token in expanded_tokens[:10]:
+        is_primary_token = token in core_tokens
+        try:
+            kw_res = supabase.table("jobs")\
+                .select("ref_no, title, company, location, apply_url, source")\
+                .ilike("title", f"%{token}%")\
+                .order("created_at", desc=True)\
+                .limit(45 if is_primary_token else 25)\
+                .execute()
+            for j in (kw_res.data or []):
+                ref = j["ref_no"]
+                if ref not in candidates_by_ref:
+                    j["apply_url"] = clean_apply_url(ref, j.get("apply_url", ""))
+                    j["_hybrid_score"] = 0.0
+                    candidates_by_ref[ref] = j
+                candidates_by_ref[ref]["_hybrid_score"] += (0.45 if is_primary_token else 0.25)
+        except Exception as e:
+            print(f"[*] Keyword fill note for '{token}': {e}")
+
+    # 3. Enriched Semantic Vector Search
     try:
-        combined_text = user_query.strip()
+        semantic_query = f"Target Role: {user_query.strip()} | Core Skills & Related Titles: {', '.join(expanded_tokens[:8])}"
         if cv_text.strip():
-            combined_text += f" | {cv_text[:250]}"
+            semantic_query += f" | Candidate Profile: {cv_text[:350]}"
 
         emb_resp = ai_client.models.embed_content(
             model="gemini-embedding-001",
-            contents=combined_text,
+            contents=semantic_query,
             config=types.EmbedContentConfig(output_dimensionality=768)
         )
         query_vec = emb_resp.embeddings[0].values
 
         rpc_res = supabase.rpc("match_jobs_semantic", {
             "query_embedding": query_vec,
-            "match_threshold": 0.15,
+            "match_threshold": 0.05,
             "match_count": top_k
         }).execute()
 
         for j in (rpc_res.data or []):
-            if j["ref_no"] not in seen_refs:
-                seen_refs.add(j["ref_no"])
-                j["apply_url"] = clean_apply_url(j["ref_no"], j.get("apply_url", ""))
-                results.append(j)
+            ref = j["ref_no"]
+            sim = float(j.get("similarity") or 0.0)
+            if ref not in candidates_by_ref:
+                j["apply_url"] = clean_apply_url(ref, j.get("apply_url", ""))
+                j["_hybrid_score"] = sim
+                candidates_by_ref[ref] = j
+            else:
+                candidates_by_ref[ref]["_hybrid_score"] += sim
     except Exception as e:
-        print(f"[*] Vector search skipped: {e}")
+        print(f"[*] Vector search note: {e}")
 
-    # 2. Balanced Cross-Platform Supplement
-    keywords = extract_query_keywords(user_query, cv_text)
-    tj_count = sum(1 for j in results if j.get("ref_no", "").startswith("TJ-"))
-    xp_count = sum(1 for j in results if j.get("ref_no", "").startswith("XP-"))
+    # 4. Sort combined pool by Hybrid Score (descending) so best matches are guaranteed at the top
+    ranked_results = sorted(
+        candidates_by_ref.values(),
+        key=lambda x: x.get("_hybrid_score", 0.0),
+        reverse=True
+    )
 
-    for prefix, src_label in [("TJ-%", "TopJobs.lk"), ("XP-%", "XpressJobs")]:
-        current_count = tj_count if prefix == "TJ-%" else xp_count
-        if current_count < 15:
-            try:
-                query = supabase.table("jobs").select("ref_no, title, company, location, apply_url, source").ilike("ref_no", prefix)
-                if keywords.split():
-                    query = query.ilike("title", f"%{keywords.split()[0]}%")
-                extra_res = query.order("created_at", desc=True).limit(20).execute()
-                for j in (extra_res.data or []):
-                    if j["ref_no"] not in seen_refs:
-                        seen_refs.add(j["ref_no"])
-                        j["apply_url"] = clean_apply_url(j["ref_no"], j.get("apply_url", ""))
-                        results.append(j)
-            except Exception as e:
-                print(f"[*] Platform fill note ({src_label}): {e}")
-
-    # 3. Final safety fill
-    if len(results) < 30:
+    # 5. Freshness Fallback if pool is very small
+    if len(ranked_results) < 30:
         try:
-            fill_res = supabase.table("jobs").select("ref_no, title, company, location, apply_url, source").order("created_at", desc=True).limit(top_k - len(results)).execute()
+            fill_res = supabase.table("jobs")\
+                .select("ref_no, title, company, location, apply_url, source")\
+                .order("created_at", desc=True)\
+                .limit(50)\
+                .execute()
             for j in (fill_res.data or []):
-                if j["ref_no"] not in seen_refs:
-                    seen_refs.add(j["ref_no"])
-                    j["apply_url"] = clean_apply_url(j["ref_no"], j.get("apply_url", ""))
-                    results.append(j)
+                ref = j["ref_no"]
+                if ref not in candidates_by_ref:
+                    j["apply_url"] = clean_apply_url(ref, j.get("apply_url", ""))
+                    ranked_results.append(j)
         except Exception as e:
             print(f"[*] Safety fill note: {e}")
 
-    return results
+    # Remove internal scoring key before sending JSON to Gemini
+    final_pool = []
+    for item in ranked_results[:top_k]:
+        clean_item = {k: v for k, v in item.items() if not k.startswith("_")}
+        final_pool.append(clean_item)
+
+    return final_pool
 
 # ----------------- MULTI-MODEL FALLBACK CALLER -----------------
 def call_gemini(prompt, schema):
@@ -525,19 +561,23 @@ used_chats = current_usage.get("chat_count", 0)
 used_cvs = current_usage.get("cv_count", 0)
 
 if is_user_pro:
-    st.sidebar.success(f"⭐ **JobGPT Pro Active**\n\n• Searches: **{used_chats} / {max_chats}** used\n• CV Reviews: **{used_cvs} / {max_cvs}** used")
+    st.sidebar.success(
+        f"⭐ **JobGPT Pro Active**\n\nSearches: **{used_chats} / {max_chats}** used\nCV Reviews: **{used_cvs} / {max_cvs}** used"
+    )
     if st.sidebar.button("Log out of Pro", use_container_width=True):
         st.session_state.is_pro = False
         st.rerun()
 else:
-    st.sidebar.info(f"👤 **Free Plan**\n\n• Searches: **{used_chats} / {max_chats}** used\n• CV Reviews: **{used_cvs} / {max_cvs}** used")
+    st.sidebar.info(
+        f"👤 **Free Plan**\n\nSearches: **{used_chats} / {max_chats}** used\nCV Reviews: **{used_cvs} / {max_cvs}** used"
+    )
     with st.sidebar.expander("🔑 Unlock Pro Access"):
         p_name = st.text_input("Username:", key="pro_name_in")
         p_pass = st.text_input("Password:", type="password", key="pro_pwd_in")
         if st.button("Activate Pro", use_container_width=True):
             valid_user = os.getenv("PRO_USER") or (st.secrets["PRO_USER"] if "PRO_USER" in st.secrets else None)
             valid_pass = os.getenv("PRO_PASSWORD") or (st.secrets["PRO_PASSWORD"] if "PRO_PASSWORD" in st.secrets else None)
-            
+
             if valid_user and valid_pass and p_name.strip() == valid_user and p_pass.strip() == valid_pass:
                 st.session_state.is_pro = True
                 st.success("Pro Activated! 10 searches + 2 CV reviews unlocked.")
@@ -617,7 +657,7 @@ if nav_selection == "💬 Job Match Chatbot":
     with c_set1:
         match_count = st.slider("Target Matches to Display:", min_value=5, max_value=30, value=20, step=5)
     with c_set2:
-        min_threshold = st.slider("Minimum Match Threshold (%):", min_value=30, max_value=85, value=50, step=5)
+        min_threshold = st.slider("Minimum Match Threshold (%):", min_value=25, max_value=85, value=35, step=5)
 
     if st.session_state.active_cv_text.strip():
         st.info("ℹ️ CV Context Active: JobGPT will match against both your prompt and CV background.", icon="📄")
@@ -661,7 +701,7 @@ if nav_selection == "💬 Job Match Chatbot":
 
             with st.chat_message("assistant"):
                 with st.spinner("Stage 1: Retrieving best matches via hybrid semantic + keyword search..."):
-                    candidate_jobs = retrieve_hybrid_jobs(user_prompt, st.session_state.active_cv_text, top_k=100)
+                    candidate_jobs = retrieve_hybrid_jobs(user_prompt, st.session_state.active_cv_text, top_k=150)
 
                 with st.spinner(f"Stage 2: JobGPT analyzing candidates to rank top {match_count}..."):
                     conversation_context = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
@@ -669,20 +709,26 @@ if nav_selection == "💬 Job Match Chatbot":
 
                     eval_prompt = f"""
                     You are JobGPT, an expert technical engineering recruiter in Sri Lanka.
-                    
+
                     {cv_section}
-                    
+
                     Conversation Context:
                     {conversation_context}
-                    
+
                     LATEST USER SEARCH QUERY: "{user_prompt}"
-                    
+
                     Candidate Vacancies Retrieved from Sri Lanka Job Database:
                     {json.dumps(candidate_jobs, indent=2)}
-                    
+
+                    SCORING RUBRIC & DOMAIN EQUIVALENCE:
+                    - 85% to 98%: Direct role match (e.g., for 'Embedded Engineer', roles in Embedded Systems, Firmware, IoT Hardware, Microcontroller, FPGA, or RTL Design).
+                    - 70% to 84%: Strong adjacent domain match (e.g., Electronic Engineer, R&D Hardware Engineer, Mechatronics, Robotics, Instrumentation, Telecommunication Hardware, or Automation Engineer).
+                    - {min_threshold}% to 69%: Transferable engineering role in a neighboring discipline (e.g., Electrical Engineer, C/C++/Python Systems Engineer, or Technical R&D Engineer).
+                    - IMPORTANT: Do NOT discard related engineering vacancies just because the title uses an industry synonym rather than the exact query phrase. Aim to return up to {match_count} relevant positions that score >= {min_threshold}%.
+
                     Instructions:
-                    1. Thoroughly evaluate these candidate vacancies against the user's latest search query and any CV context provided.
-                    2. Select the top {match_count} best matching opportunities with a match score >= {min_threshold}%.
+                    1. Thoroughly evaluate these candidate vacancies against the user's latest search query, the scoring rubric above, and any CV context provided.
+                    2. Select up to the top {match_count} best matching opportunities with a match score >= {min_threshold}%.
                     3. Sort the returned matches strictly from highest match score to lowest.
                     4. For each matched position, provide the match score, domain category, a clear 2-sentence explanation of why it fits, and any skill gaps to prepare.
                     """
@@ -757,12 +803,12 @@ elif nav_selection == "📄 AI CV Optimizer & ATS Keywords":
                 with st.spinner("Auditing resume against industry recruitment standards..."):
                     opt_prompt = f"""
                     You are JobGPT's principal technical hiring manager and engineering resume strategist.
-                    
+
                     Target Specialization: {target_focus}
-                    
+
                     Resume to Review:
                     {st.session_state.active_cv_text}
-                    
+
                     Task:
                     1. Provide an ATS readiness score (0-100).
                     2. Summarize strategic strengths and critiques.
