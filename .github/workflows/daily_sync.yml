@@ -54,3 +54,11 @@ jobs:
           supabase.table('jobs').delete().lt('created_at', cutoff).execute()
           print('Purged jobs older than', cutoff)
           "
+
+      - name: Index public posting requirements
+        continue-on-error: true
+        timeout-minutes: 9
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python enrich_job_details.py

@@ -34,7 +34,13 @@ JobGPT aggregates active technical vacancies across **TopJobs.lk**, **LinkedIn**
 2. Set `SUPABASE_URL`, `SUPABASE_KEY`, and `GEMINI_API_KEY` in `.env` or `.streamlit/secrets.toml`. Use the existing JobGPT Supabase project with the jobs, quota, and analytics tables and matching RPC.
 3. Run `python -m streamlit run app.py`.
 
-Job Search uses keyword and vector retrieval in parallel by default, without waiting for text generation. **Add AI fit scores** optionally reranks a short list; if Gemini is slow or unavailable, the app shows the retrieved listings without fit scores. The landing page shows the count and newest listings from the regularly synced index. Confirm availability on the original portal.
+Job Search runs keyword and vector retrieval in parallel, searches available posting text as well as titles, then asks Gemini to evaluate a shortlist against the request and CV. It separates **Best matches**, which must cite text from the posting, from **Worth checking**, where requirements are not confirmed. Follow-ups such as **“Only remote”** retain the previous search topic. If Gemini is unavailable, the app labels results as unverified leads.
+
+### Enable posting evidence on an existing database
+
+1. Run [`supabase/migrations/20261126000000_job_posting_evidence.sql`](supabase/migrations/20261126000000_job_posting_evidence.sql) in the Supabase SQL Editor.
+2. Deploy the app and push the updated daily workflow, or run `python enrich_job_details.py` once with the existing Supabase environment variables to start backfilling.
+3. The daily workflow collects short excerpts from a limited batch of public postings. Coverage builds over time; blocked, image-only, or unavailable postings remain unverified. No job portal is called during a search.
 
 The app discovers versioned Flash models that advertise `generateContent` for your key, prefers Flash-Lite when available, and can fall back from `v1` to `v1beta` within the generation time budget. Embeddings stay on `v1`. You can optionally set `GEMINI_MODEL` to prefer a specific discovered model on the available endpoint. To see what your key advertises, run `python list_models.py` with `GEMINI_API_KEY` in your environment or `.env`. CV Studio needs a working generation model.
 
