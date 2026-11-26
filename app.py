@@ -5,6 +5,7 @@ import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from time import monotonic
 from typing import Literal
@@ -24,6 +25,13 @@ from search_intent import is_senior_title, resolve_search
 load_dotenv()
 logger = logging.getLogger(__name__)
 JOB_FIELDS = "ref_no, title, company, location, apply_url, source"
+CHAT_PLACEHOLDER = "Tell JobGPT what you’re looking for…"
+SEARCH_EXAMPLES = (
+    ("Junior firmware in Colombo", "Find junior firmware roles in Colombo. I’m a fresh graduate."),
+    ("Remote Python roles", "Show me remote jobs where I can work with Python from Sri Lanka."),
+    ("Embedded & firmware", "Find embedded systems and firmware roles involving C++ and microcontrollers."),
+    ("Solar & renewables", "I’m looking for engineering roles in solar power and renewable energy."),
+)
 
 st.set_page_config(
     page_title="JobGPT | Sri Lanka Tech & Engineering Careers",
@@ -390,8 +398,11 @@ def retrieve_hybrid_jobs(
     return ranked[:top_k]
 
 # ----------------- SIDEBAR: NAVIGATION, PRO TIER & CV BUFFER -----------------
-st.sidebar.title("⚡ JobGPT")
-st.sidebar.caption("Sri Lanka · Engineering & Tech")
+st.sidebar.markdown(
+    '<div class="jg-sidebar-brand"><span class="jg-brand-mark" aria-hidden="true">✦</span>'
+    '<div><strong>JobGPT</strong><small>Sri Lanka · Engineering &amp; Tech</small></div></div>',
+    unsafe_allow_html=True,
+)
 st.sidebar.markdown("### Workspace")
 nav_selection = st.sidebar.radio(
     "Choose a workspace",
@@ -471,7 +482,7 @@ st.sidebar.caption(f"{track_and_get_visitor_count():,} site visits")
 
 
 def render_job_card(job, card_key):
-    with st.container(border=True):
+    with st.container(border=True, key=f"listing-{card_key}"):
         st.subheader(job["title"])
         source = get_source_badge(job["ref_no"], job.get("source") or "")
         st.markdown(f"{job['company']} · {job['location']} · {source}")
@@ -498,10 +509,12 @@ def job_card_data(job):
     }
 
 
-def render_hero(kicker, title, description, details):
+def render_hero(kicker, title, description, details=""):
+    detail = f'<p class="jg-details">{escape(details)}</p>' if details else ""
     st.markdown(
-        f'<header class="jg-hero"><p class="jg-kicker">{kicker}</p>'
-        f'<h1>{title}</h1><p>{description}</p><p class="jg-details">{details}</p></header>',
+        f'<header class="jg-hero"><div class="jg-hero-copy"><p class="jg-kicker">{escape(kicker)}</p>'
+        f'<h1>{escape(title)}</h1><p class="jg-deck">{escape(description)}</p>'
+        f'{detail}</div></header>',
         unsafe_allow_html=True,
     )
 
@@ -620,92 +633,126 @@ def match_jobs(user_prompt, match_count, min_threshold, ai_fit, exclude_senior=F
     )
 
 
-if nav_selection == "Job Search":
-    render_hero(
-        "01 / Job Search",
-        "Find your next role in Sri Lanka",
-        "Search engineering and tech jobs by role, skill, location, or company.",
-        "TopJobs.lk · LinkedIn · XpressJobs",
-    )
+def start_new_search():
+    st.session_state.chat_messages = []
+    st.session_state.pop("search_intent", None)
+
+
+def render_search_message(index, msg):
+    avatar = ":material/auto_awesome:" if msg["role"] == "assistant" else ":material/person:"
+    with st.chat_message(msg["role"], avatar=avatar):
+        if msg["role"] == "user":
+            st.text(msg["content"])
+        else:
+            st.markdown(msg["content"])
+        group = None
+        for card_index, job in enumerate(msg.get("job_cards", [])):
+            assessment = job.get("assessment")
+            if assessment and assessment != group:
+                st.markdown("### Best matches" if assessment == "strong_match" else "### Worth checking")
+                group = assessment
+            render_job_card(job, f"vacancy_{index}_{card_index}")
+
+
+def render_listings_feed():
     try:
         active_vacancies, latest_jobs = get_active_job_feed(sb_url, supabase)
     except Exception as error:
         logger.warning("Active vacancies unavailable (%s)", type(error).__name__)
         active_vacancies, latest_jobs = None, []
-    with st.container(border=True):
-        st.metric("Active job listings", f"{active_vacancies:,}" if active_vacancies is not None else "Unavailable")
-        st.caption("Based on the latest job index. Check the original portal for current availability.")
+    with st.container(border=True, key="job-market"):
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            st.metric("Active job listings", f"{active_vacancies:,}" if active_vacancies is not None else "Unavailable", width="content")
+            st.caption("TopJobs.lk · LinkedIn · XpressJobs")
+        with st.expander("Browse latest listings", icon=":material/work_outline:"):
+            st.caption("These are the newest indexed jobs, not personalized matches.")
+            if latest_jobs:
+                for index, job in enumerate(latest_jobs):
+                    render_job_card(job_card_data(job), f"latest_vacancy_{index}")
+            elif active_vacancies == 0:
+                st.caption("No vacancies are currently indexed.")
+            else:
+                st.caption("Could not load the latest listings. Try again later.")
 
-    if st.session_state.active_cv_text.strip():
-        st.caption("CV attached · Search results will use your CV and your query.")
-    else:
-        st.caption("No CV attached · Search by query alone, or add your CV in the sidebar.")
 
-    ai_fit = st.toggle(
-        "Evaluate matches with Gemini",
-        value=True,
-        help="Gemini checks a short list against your request. Turn off for hybrid search without AI scores.",
+if nav_selection == "Job Search":
+    render_hero(
+        "JobGPT · Engineering & tech careers",
+        "Find your next role in Sri Lanka.",
+        "Just tell JobGPT what you’re looking for. Describe your ideal job in your own words.",
     )
-    with st.expander("Search settings"):
-        left, right = st.columns(2)
-        match_count = left.slider("Maximum results", min_value=5, max_value=15 if ai_fit else 30, value=10, step=5)
-        min_threshold = right.slider("Minimum AI fit (%)", min_value=25, max_value=85, value=35, step=5, disabled=not ai_fit)
-        exclude_senior = st.checkbox("Exclude senior roles", help="Hide senior, lead, and management titles in search results.")
-
+    history = st.session_state.chat_messages
+    chat_active = bool(history)
     quick_prompt = None
-    if not st.session_state.chat_messages:
-        st.markdown("**Try a search**")
-        with st.container(horizontal=True):
-            for label, prompt in [
-                ("Solar & renewables", "Solar power, BESS and renewable energy engineering roles"),
-                ("Embedded & firmware", "Embedded systems, firmware and C++ microcontroller roles"),
-                ("Civil & structural", "Civil site engineer and structural design positions"),
-                ("AI / ML & Python", "Machine learning, computer vision and Python roles"),
-            ]:
-                if st.button(label):
-                    quick_prompt = prompt
+    with st.container(border=True, key="job-chat"):
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            guidance = "Keep refining your search below." if chat_active else "Type in the message box below to start."
+            st.markdown(
+                '<div class="jg-chat-heading"><span class="jg-chat-mark" aria-hidden="true">✦</span>'
+                f'<div><h2>Chat with JobGPT</h2><p>{guidance}</p></div></div>',
+                unsafe_allow_html=True,
+                width="content",
+            )
+            if chat_active:
+                st.button("New search", icon=":material/add:", on_click=start_new_search)
 
-    with st.expander("Browse latest listings (unfiltered)", expanded=not st.session_state.chat_messages and not quick_prompt):
-        if latest_jobs:
-            for index, job in enumerate(latest_jobs):
-                render_job_card(job_card_data(job), f"latest_vacancy_{index}")
-        elif active_vacancies == 0:
-            st.caption("No vacancies are currently indexed.")
-        else:
-            st.caption("Could not load the latest listings. Try again later.")
+        if not chat_active:
+            st.caption("Try an example")
+            with st.container(horizontal=True, key="job-examples"):
+                for label, prompt in SEARCH_EXAMPLES:
+                    if st.button(label, key=f"example-{label}"):
+                        quick_prompt = prompt
+        if st.session_state.active_cv_text.strip():
+            st.caption("CV attached · Your CV helps personalize your matches.")
+        elif not chat_active:
+            st.caption("No CV needed. You can add one in the sidebar for more tailored matches.")
 
-    for msg_index, msg in enumerate(st.session_state.chat_messages):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            group = None
-            for card_index, job in enumerate(msg.get("job_cards", [])):
-                assessment = job.get("assessment")
-                if assessment and assessment != group:
-                    st.markdown("### Best matches" if assessment == "strong_match" else "### Worth checking")
-                    group = assessment
-                render_job_card(job, f"vacancy_{msg_index}_{card_index}")
+        with st.expander("Search settings", icon=":material/tune:"):
+            ai_fit = st.toggle(
+                "Evaluate matches with Gemini",
+                value=True,
+                help="Gemini checks a short list against your request. Turn off for hybrid search without AI scores.",
+            )
+            left, right = st.columns(2)
+            match_count = left.slider("Maximum results", min_value=5, max_value=15 if ai_fit else 30, value=10, step=5)
+            min_threshold = right.slider("Minimum AI fit (%)", min_value=25, max_value=85, value=35, step=5, disabled=not ai_fit)
+            exclude_senior = st.checkbox("Exclude senior roles", help="Hide senior, lead, and management titles in search results.")
 
-    chat_input = st.chat_input("Try: Junior firmware roles in Colombo", max_chars=600)
+    conversation = st.container(key="job-conversation")
+    if chat_active:
+        with conversation:
+            if len(history) > 2:
+                with st.expander("Earlier messages", icon=":material/history:"):
+                    for msg_index, msg in enumerate(history[:-2]):
+                        render_search_message(msg_index, msg)
+            for msg_index, msg in enumerate(history[-2:], start=max(0, len(history) - 2)):
+                render_search_message(msg_index, msg)
+
+    # A root-level chat input stays docked, including before the first message.
+    chat_input = st.chat_input(CHAT_PLACEHOLDER, key="job_prompt", max_chars=600)
+
     user_prompt = (quick_prompt or chat_input or "").strip()
     if user_prompt:
         allowed, quota_msg = check_and_increment_quota("chat", current_usage)
         if not allowed:
-            st.warning(quota_msg)
+            conversation.warning(quota_msg)
         else:
             st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
-            with st.chat_message("user"):
-                st.markdown(user_prompt)
-            with st.chat_message("assistant"):
-                reply, cards = match_jobs(user_prompt, match_count, min_threshold, ai_fit, exclude_senior)
+            with conversation:
+                with st.chat_message("user", avatar=":material/person:"):
+                    st.text(user_prompt)
+                with st.chat_message("assistant", avatar=":material/auto_awesome:"):
+                    reply, cards = match_jobs(user_prompt, match_count, min_threshold, ai_fit, exclude_senior)
             st.session_state.chat_messages.append({"role": "assistant", "content": reply, "job_cards": cards})
             st.rerun()
+    render_listings_feed()
 
 # =================================================
 # VIEW 2: AI CV OPTIMIZER
 # =================================================
 elif nav_selection == "CV Studio":
     render_hero(
-        "02 / CV Studio",
+        "JobGPT · CV Studio",
         "Tailor your CV to a role",
         "Spot relevant keywords and turn experience into clearer, evidence-based bullet points.",
         "ATS readiness estimate · Keyword ideas · Google XYZ rewrites",

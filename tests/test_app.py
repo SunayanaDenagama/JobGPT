@@ -81,6 +81,26 @@ class AppTests(TestCase):
         self.generator.generate.assert_not_called()
         self.embedding_client.models.embed_content.assert_not_called()
 
+    def test_chat_stays_docked_and_new_search_clears_only_chat(self):
+        self.assertEqual(len(self.app.chat_input), 1)
+        self.assertFalse(self.app.main.chat_input)  # Composer is not inline.
+        self.assertIn("Just tell JobGPT what you’re looking for", str(self.app.markdown.values))
+        self.assertIn("Chat with JobGPT", str(self.app.markdown.values))
+        next(button for button in self.app.button if button.label == "Sample CV").click().run()
+        self.generator.generate.return_value = (None, GENERATION_UNAVAILABLE)
+        self.app.chat_input[0].set_value("Firmware roles").run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(len(self.app.chat_input), 1)
+        self.assertFalse(self.app.main.chat_input)
+        self.assertTrue(self.app.session_state["chat_messages"])
+        next(button for button in self.app.button if button.label == "New search").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(self.app.session_state["chat_messages"], [])
+        self.assertNotIn("search_intent", self.app.session_state)
+        self.assertTrue(self.app.session_state["active_cv_text"])
+        self.assertEqual(len(self.app.chat_input), 1)
+        self.assertFalse(self.app.main.chat_input)
+
     def test_fast_search_uses_one_keyword_request_and_no_generation(self):
         self.app.toggle[0].set_value(False).run()
         self.app.chat_input[0].set_value("Firmware jobs in Colombo").run()
