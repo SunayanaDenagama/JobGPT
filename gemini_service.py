@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 API_VERSIONS = ("v1", "v1beta")
 FLASH_MODEL = re.compile(r"gemini-(\d+(?:\.\d+)*)-flash(-lite)?(-preview(?:-\d+(?:-\d+)*)?)?(?:-\d{3})?")
 CATALOG_TTL = 900
-GENERATION_UNAVAILABLE = "Gemini is temporarily unavailable. Please try again in a few minutes."
+GENERATION_UNAVAILABLE = "Gemini didn’t respond in time or is temporarily unavailable. Please try again."
 TRANSPORT_ERRORS = (httpx.TransportError,) + ((httpx2.TransportError,) if httpx2 else ())
 REQUEST_ERRORS = (APIError,) + TRANSPORT_ERRORS
 INVALID_RESPONSE_ERRORS = (ValidationError,) + TRANSPORT_ERRORS
@@ -28,21 +28,24 @@ INVALID_RESPONSE_ERRORS = (ValidationError,) + TRANSPORT_ERRORS
 def make_client(api_key: str, version: str, timeout_ms: int = 35_000):
     return genai.Client(
         api_key=api_key.strip(),
-        http_options=types.HttpOptions(api_version=version, timeout=timeout_ms),
+        http_options=types.HttpOptions(
+            api_version=version, timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1)
+        ),
     )
 
 
-def discover_text_models(client) -> list[str]:
+def discover_text_models(client, timeout_ms: int = 3_000) -> list[str]:
     """Only choose versioned Flash models advertised for generateContent."""
     models = set()
-    for model in client.models.list():
+    config = types.ListModelsConfig(page_size=100, http_options=types.HttpOptions(timeout=timeout_ms))
+    for model in client.models.list(config=config):
         name = (model.name or "").removeprefix("models/")
         if "generateContent" in (model.supported_actions or []) and FLASH_MODEL.fullmatch(name):
             models.add(name)
 
     def priority(name):
         version, lite, preview = FLASH_MODEL.fullmatch(name).groups()
-        return (not preview, tuple(map(int, version.split("."))), not lite, name)
+        return (not preview, bool(lite), tuple(map(int, version.split("."))), name)
 
     return sorted(models, key=priority, reverse=True)
 
@@ -58,12 +61,12 @@ class GeminiGenerator:
     def from_key(cls, api_key: str, preferred_model: str = ""):
         return cls({version: make_client(api_key, version) for version in API_VERSIONS}, preferred_model)
 
-    def _models_for(self, version):
+    def _models_for(self, version, discovery_timeout_ms):
         now = monotonic()
         expires, models = self.catalogs.get(version, (0, []))
         if now >= expires:
             try:
-                models = discover_text_models(self.clients[version])
+                models = discover_text_models(self.clients[version], discovery_timeout_ms)
                 self.catalogs[version] = (monotonic() + CATALOG_TTL, models)
             except REQUEST_ERRORS as error:
                 logger.warning("Gemini model listing failed on %s (%s)", version, getattr(error, "code", type(error).__name__))
@@ -79,17 +82,31 @@ class GeminiGenerator:
             preferred.insert(0, last_working[1])
         return list(dict.fromkeys(preferred + models))
 
-    def generate(self, prompt, schema):
+    def generate(self, prompt, schema, *, budget_ms=20_000, attempt_timeout_ms=9_000, max_output_tokens=2_500):
+        deadline = monotonic() + budget_ms / 1_000
+
+        def remaining_ms():
+            return int((deadline - monotonic()) * 1_000)
+
         versions = list(self.clients)
         last_working = self.last_working
         if last_working:
             versions.remove(last_working[0])
             versions.insert(0, last_working[0])
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json", response_schema=schema, temperature=0.1
-        )
         for version in versions:
-            for model in self._models_for(version)[:2]:
+            if remaining_ms() < 1_000:
+                break
+            for model in self._models_for(version, min(remaining_ms(), 2_000))[:2]:
+                left = remaining_ms()
+                if left < 1_000:
+                    return None, GENERATION_UNAVAILABLE
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.1,
+                    max_output_tokens=max_output_tokens,
+                    http_options=types.HttpOptions(timeout=min(left, attempt_timeout_ms)),
+                )
                 try:
                     response = self.clients[version].models.generate_content(
                         model=model, contents=prompt, config=config

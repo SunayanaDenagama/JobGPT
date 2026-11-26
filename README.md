@@ -34,6 +34,8 @@ JobGPT aggregates active technical vacancies across **TopJobs.lk**, **LinkedIn**
 2. Set `SUPABASE_URL`, `SUPABASE_KEY`, and `GEMINI_API_KEY` in `.env` or `.streamlit/secrets.toml`. Use the existing JobGPT Supabase project with the jobs, quota, and analytics tables and matching RPC.
 3. Run `python -m streamlit run app.py`.
 
-The app discovers versioned Flash models that advertise `generateContent` for your key, tries `v1` first, and can fall back to `v1beta` for generation. Embeddings stay on `v1`. You can optionally set `GEMINI_MODEL` to prefer a specific discovered model on the available endpoint. To see what your key advertises, run `python list_models.py` with `GEMINI_API_KEY` in your environment or `.env`. If generation is unavailable, job search can still show retrieved listings without AI fit scores. CV Studio needs a working generation model.
+Job Search uses keyword and vector retrieval in parallel by default, without waiting for text generation. **Add AI fit scores** optionally reranks a short list; if Gemini is slow or unavailable, the app shows the retrieved listings without fit scores. The landing page shows the count and newest listings from the regularly synced index. Confirm availability on the original portal.
+
+The app discovers versioned Flash models that advertise `generateContent` for your key, prefers Flash-Lite when available, and can fall back from `v1` to `v1beta` within the generation time budget. Embeddings stay on `v1`. You can optionally set `GEMINI_MODEL` to prefer a specific discovered model on the available endpoint. To see what your key advertises, run `python list_models.py` with `GEMINI_API_KEY` in your environment or `.env`. CV Studio needs a working generation model.
 
 Run the offline regression tests with `python -m unittest discover -s tests`.

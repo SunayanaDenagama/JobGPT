@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 from google import genai
@@ -89,6 +89,23 @@ class GeminiGeneratorTests(TestCase):
             GeminiGenerator({"v1": stable, "v1beta": beta}).generate("prompt", Report),
             (None, GENERATION_UNAVAILABLE),
         )
+
+    def test_stops_fallback_when_time_budget_runs_out(self):
+        stable = client(advertised("gemini-2.5-flash"))
+        beta = client(advertised("gemini-3.1-flash-lite"))
+        generator = GeminiGenerator({"v1": stable, "v1beta": beta})
+        elapsed = [0]
+
+        def timeout(**kwargs):
+            self.assertEqual(kwargs["config"].http_options.timeout, 8_000)
+            elapsed[0] = 10
+            raise httpx.ReadTimeout("generation timed out")
+
+        stable.models.generate_content.side_effect = timeout
+        with patch("gemini_service.monotonic", side_effect=lambda: elapsed[0]):
+            result = generator.generate("prompt", Report, budget_ms=10_000, attempt_timeout_ms=8_000)
+        self.assertEqual(result, (None, GENERATION_UNAVAILABLE))
+        beta.models.list.assert_not_called()
 
     def test_sdk_lists_and_generates_on_the_same_api_version(self):
         paths = []
