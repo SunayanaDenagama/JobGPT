@@ -1,12 +1,9 @@
 import os
 import json
-import time
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
 from dotenv import load_dotenv
+from gemini_service import GeminiGenerator
 
 load_dotenv()
 
@@ -14,7 +11,7 @@ supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_KEY")
 )
-ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+generator = GeminiGenerator.from_key(os.environ["GEMINI_API_KEY"], os.getenv("GEMINI_MODEL", ""))
 
 # Strict output schema
 class JobMatch(BaseModel):
@@ -39,9 +36,7 @@ def evaluate_jobs_for_candidate(profile_description: str, target_location: str =
         print("[!] No jobs found in database. Run sync_jobs.py first.")
         return None
 
-    # Using the verified latest production endpoint
-    model_name = "gemini-flash-latest"
-    print(f"[*] Analyzing {len(jobs_data)} jobs against your profile using {model_name}...")
+    print(f"[*] Analyzing {len(jobs_data)} jobs against your profile...")
 
     prompt = f"""
     You are an expert career mentor and technical recruiter in Sri Lanka.
@@ -59,27 +54,10 @@ def evaluate_jobs_for_candidate(profile_description: str, target_location: str =
     3. State clearly why it's a fit and note any missing skills or experience gaps.
     """
 
-    for attempt in range(3):
-        try:
-            response = ai_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=MatchReport,
-                    temperature=0.1,
-                ),
-            )
-            report = MatchReport.model_validate_json(response.text)
-            return report
-
-        except APIError as e:
-            if e.code == 503 and attempt < 2:
-                wait_time = (attempt + 1) * 3
-                print(f"[!] Endpoint busy (503). Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-            else:
-                raise e
+    report, error = generator.generate(prompt, MatchReport)
+    if error:
+        print(f"[!] {error}")
+    return report
 
 if __name__ == "__main__":
     my_profile = "Junior developer with skills in Python, basic React, Git, and SQL. Looking for entry-level, associate, or trainee software engineering roles."

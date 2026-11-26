@@ -1,0 +1,36 @@
+[data-testid="stMainBlockContainer"] {
+    max-width: 68rem;
+    padding-top: 3.5rem;
+}
+
+.jg-hero {
+    background: linear-gradient(115deg, #183b43 0%, #1b2636 68%);
+    border: 1px solid #385969;
+    border-radius: 1rem;
+    padding: clamp(1.25rem, 4vw, 2.5rem);
+}
+
+.jg-hero h1 {
+    color: #f0f5fb;
+    font-size: clamp(1.8rem, 5vw, 3rem);
+    letter-spacing: -.035em;
+    line-height: 1.14;
+    margin: .25rem 0 .75rem;
+    padding: 0;
+}
+
+.jg-hero p { color: #d0dce9; margin: 0; }
+.jg-hero .jg-kicker {
+    color: #8cefd5;
+    font-size: .75rem;
+    font-weight: 750;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+}
+.jg-hero .jg-details { margin-top: 1rem; font-size: .86rem; }
+
+[data-testid="stChatMessage"] { border-radius: .85rem; }
+
+@media (max-width: 640px) {
+    [data-testid="stMainBlockContainer"] { padding-inline: 1rem; }
+}

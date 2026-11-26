@@ -1,16 +1,17 @@
 import os
-from google import genai
 from dotenv import load_dotenv
+from gemini_service import API_VERSIONS, REQUEST_ERRORS, discover_text_models, make_client
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-print("[*] Fetching all supported models for your API key...")
-try:
-    for model in client.models.list():
-        # Check if the model supports content generation
-        if "generateContent" in (model.supported_actions or []):
-            print(f"-> {model.name}")
-except Exception as e:
-    print(f"Error: {e}")
+if __name__ == "__main__":
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise SystemExit("Set GEMINI_API_KEY in your environment or .env first.")
+    for version in API_VERSIONS:
+        try:
+            with make_client(api_key, version) as client:
+                names = discover_text_models(client)
+            print(f"{version}: {', '.join(names) or 'no supported Flash models'}")
+        except REQUEST_ERRORS as error:
+            print(f"{version}: listing failed ({getattr(error, 'code', type(error).__name__)})")
